@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>POD Go USB Test</title>
+<style>
+  body{font-family:system-ui,sans-serif;background:#111;color:#eee;margin:0;padding:16px}
+  button{background:#e8590c;color:#fff;border:0;border-radius:8px;padding:14px 18px;font-size:16px;margin:4px 4px 4px 0}
+  button:disabled{opacity:.4}
+  #log{background:#000;border:1px solid #333;border-radius:8px;padding:10px;font:12px/1.5 monospace;white-space:pre-wrap;min-height:240px;margin-top:12px}
+  .ok{color:#51cf66}.err{color:#ff6b6b}
+</style>
+</head>
+<body>
+<h2>POD Go USB Test</h2>
+<button id="btnConnect">1. Conectar POD Go</button>
+<button id="btnCopy">Copiar log</button>
+<div id="log"></div>
+
+<script>
+const LINE6_VID = 0x0E41;
+const logEl = document.getElementById('log');
+let dev = null;
+
+function log(msg, cls){
+  const s = document.createElement('span');
+  if (cls) s.className = cls;
+  s.textContent = msg + '\n';
+  logEl.appendChild(s);
+}
+const hex = n => '0x' + n.toString(16).padStart(4,'0');
+
+if (!('usb' in navigator)){
+  log('WebUSB no disponible. Usa Chrome en Android y abre la página por HTTPS.', 'err');
+  document.getElementById('btnConnect').disabled = true;
+} else {
+  log('WebUSB disponible. Conecta la POD Go con el cable OTG y pulsa Conectar.', 'ok');
+}
+
+document.getElementById('btnConnect').onclick = async () => {
+  try {
+    dev = await navigator.usb.requestDevice({ filters:[{ vendorId: LINE6_VID }] });
+    log(`Dispositivo: ${dev.productName} | VID ${hex(dev.vendorId)} PID ${hex(dev.productId)}`, 'ok');
+    log(`Serie: ${dev.serialNumber || '(n/d)'}`);
+
+    await dev.open();
+    log('open() OK', 'ok');
+
+    if (dev.configuration === null) await dev.selectConfiguration(1);
+    log(`Configuración activa: ${dev.configuration.configurationValue}`);
+
+    for (const i of dev.configuration.interfaces){
+      for (const a of i.alternates){
+        log(`Interfaz ${i.interfaceNumber} alt ${a.alternateSetting} clase ${a.interfaceClass} (${a.interfaceName || 'sin nombre'})`);
+        for (const e of a.endpoints){
+          log(`   endpoint ${e.endpointNumber} ${e.direction} ${e.type} paquete ${e.packetSize}`);
+        }
+      }
+    }
+
+    // Intentar reclamar cada interfaz para ver cuáles se pueden usar
+    for (const i of dev.configuration.interfaces){
+      try {
+        await dev.claimInterface(i.interfaceNumber);
+        log(`claimInterface(${i.interfaceNumber}) OK`, 'ok');
+      } catch(e){
+        log(`claimInterface(${i.interfaceNumber}) falló: ${e.message}`, 'err');
+      }
+    }
+    log('Listo. Copia este log y pégalo en el chat.', 'ok');
+  } catch(e){
+    log('Error: ' + e.message, 'err');
+  }
+};
+
+document.getElementById('btnCopy').onclick = () =>
+  navigator.clipboard.writeText(logEl.textContent).then(()=>log('Log copiado.','ok'));
+</script>
+</body>
+</html>
