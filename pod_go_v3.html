@@ -40,6 +40,17 @@
   .seg{display:flex;gap:0}.seg button{border-radius:0;padding:8px 18px;background:#222}
   .seg button:first-child{border-radius:8px 0 0 8px}.seg button:last-child{border-radius:0 8px 8px 0}
   .seg button.a{background:var(--ac);color:#000;font-weight:700}
+  .blk.empty{background:#181818!important;border:2px dashed #444;color:#777;text-shadow:none;font-weight:400}
+  .blk.empty.sel{border-color:#fff}
+  #mm{position:fixed;inset:0;background:#000e;z-index:10;display:none;overflow:auto;padding:10px}
+  #mm.show{display:block}
+  #mm .in{max-width:520px;margin:0 auto}
+  #mm input[type=search]{width:100%;font-size:16px;padding:10px;border-radius:8px;border:1px solid #444;background:#222;color:#fff;margin:8px 0}
+  #tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+  #tabs button{padding:6px 10px;font-size:12px;color:#000;font-weight:700}
+  #tabs button.off{opacity:.35}
+  #mlist button{display:block;width:100%;text-align:left;margin:3px 0;padding:11px;font-size:15px}
+  #mlist button.cur{outline:2px solid var(--ac)}
   #modal{position:fixed;inset:0;background:#000d;z-index:9;display:none;overflow:auto;padding:10px}
   #modal.show{display:block}
   #grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;max-width:520px;margin:0 auto}
@@ -57,11 +68,15 @@
   <button id="bCon">Conectar</button>
 </header>
 <div id="state">Conecta la POD Go con el cable OTG y pulsa Conectar.</div>
+<label style="display:block;font-size:12px;color:#8a8a8a;padding:0 10px 4px"><input type="checkbox" id="auto" checked> Auto-actualizar (detecta cambios hechos en la pedalera)</label>
 <div id="snaps"></div>
 <div id="chain"><div class="row" id="r1"></div><div class="row" id="r2"></div></div>
 <div id="panel"><div id="ph"><b>Conecta para ver el preset</b></div><div id="pars"></div></div>
 
 <div id="modal"><div style="max-width:520px;margin:0 auto 8px;text-align:right"><button id="mClose">Cerrar ✕</button></div><div id="grid"></div></div>
+
+<div id="mm"><div class="in"><div style="text-align:right"><button id="mmClose">Cerrar ✕</button></div>
+  <input id="mq" type="search" placeholder="Buscar modelo…"><div id="tabs"></div><div id="mlist"></div></div></div>
 
 <details><summary>Registro</summary>
   <div style="margin:6px 0"><button id="bCopy">Copiar</button> <button id="bClr">Limpiar</button></div>
@@ -143,33 +158,42 @@ let names={};try{names=JSON.parse(localStorage.getItem('pgnames')||'{}')}catch(e
 function saveName(i,n){names[i]=n;try{localStorage.setItem('pgnames',JSON.stringify(names))}catch(e){}}
 
 function parsePreset(str){
-  const b=Uint8Array.from(str,c=>c.charCodeAt(0)&255),blocks=[];
-  for(let i=0;i<b.length-4;){
-    if(b[i]===0x82&&b[i+1]===0x13){
-      try{
-        const[d,j]=dec(b,i),c=d&&d[20];
-        if(c&&c[24]&&c[24][25]!==undefined&&c[11]&&c[11][4]){
-          blocks.push({mid:c[24][25],on:c[10]!==false,v:c[11][4].slice()});i=j;continue;
-        }
-      }catch(e){}
-    }
-    i++;
+  const b=Uint8Array.from(str,c=>c.charCodeAt(0)&255),blocks=[],pat=[0x82,0x15,0x00,0x16,0x9c];
+  let at=-1;
+  for(let k=0;k<b.length-5&&at<0;k++){let ok=true;for(let j=0;j<5;j++)if(b[k+j]!==pat[j]){ok=false;break}if(ok)at=k}
+  if(at>=0){
+    // array de 12 entradas: [entrada, 10 bloques, salida]; tipo 8 = campo vacío
+    try{
+      const[d]=dec(b,at),a=d[22];
+      for(let k=1;k<=10&&k<a.length;k++){
+        const c=a[k]&&a[k][20];
+        if(c&&c[24]&&c[24][25]!==undefined)blocks.push({empty:false,mid:c[24][25],on:c[10]!==false,v:((c[11]&&c[11][4])||[]).slice()});
+        else blocks.push({empty:true});
+      }
+    }catch(e){log('Error en la lista de bloques: '+e.message,'er')}
   }
-  // nombres de snapshot: clave 4 (fixstr) seguida de la clave 5 (tempo, float)
-  const txt=str,sn=[],re=/\x04[\xa1-\xbf]([\x20-\x7e]*)\x00\x05\xca/g;let m;
-  while((m=re.exec(txt)))sn.push(m[1]);
+  const sn=[],re=/\x04[\xa1-\xbf]([\x20-\x7e]*)\x00\x05\xca/g;let m;
+  while((m=re.exec(str)))sn.push(m[1]);
   return{blocks,sn};
 }
 function modelOf(bl){
   if(!DB)return null;
   const sid=DB.sym[bl.mid];return sid?{sid,m:DB.m[sid]||null}:null;
 }
+let lastSig='';
 function applyDump(str){
   const r=parsePreset(str);
-  P.blocks=r.blocks.map((b,i)=>{const mo=modelOf(b);return{id:i+1,mid:b.mid,on:b.on,v:b.v,sid:mo&&mo.sid,m:mo&&mo.m}});
+  const nb=r.blocks.map((b,i)=>{
+    if(b.empty)return{id:i+1,empty:true,on:false,v:[]};
+    const mo=modelOf(b);return{id:i+1,empty:false,mid:b.mid,on:b.on,v:b.v,sid:mo&&mo.sid,m:mo&&mo.m};
+  });
+  const sig=JSON.stringify([nb.map(x=>[x.empty,x.mid,x.on,x.v]),r.sn,P.snap]);
+  if(sig===lastSig)return;
+  lastSig=sig;
+  P.blocks=nb;
   if(r.sn.length>=4)P.snaps=r.sn.slice(0,4);
   if(P.sel>=P.blocks.length)P.sel=0;
-  log(`Preset leído: ${P.blocks.length} bloques`,'ok');
+  log(`Preset leído: ${P.blocks.filter(b=>!b.empty).length} bloques, ${P.blocks.filter(b=>b.empty).length} vacíos`,'ok');
   render();
 }
 
@@ -188,10 +212,16 @@ function renderChain(){
   const io=t=>{const d=document.createElement('div');d.className='io';d.textContent=t;return d};
   r1.appendChild(io('●'));
   P.blocks.forEach((b,i)=>{
-    const [lab,col]=catOf(b),d=document.createElement('div');
-    d.className='blk'+(b.on?'':' off')+(i===P.sel?' sel':'');d.style.background=col;
-    d.innerHTML=`${lab}<small>${b.m?b.m.n:'Bloque '+b.id}</small><i>⏻</i>`;
-    d.onclick=e=>{if(e.target.tagName==='I'){toggleBlock(i)}else selectBlock(i)};
+    const d=document.createElement('div');
+    if(b.empty){
+      d.className='blk empty'+(i===P.sel?' sel':'');d.innerHTML='<small>Campo vacío</small>';
+      d.onclick=()=>selectBlock(i);
+    }else{
+      const [lab,col]=catOf(b);
+      d.className='blk'+(b.on?'':' off')+(i===P.sel?' sel':'');d.style.background=col;
+      d.innerHTML=`${lab}<small>${b.m?b.m.n:'Modelo '+b.mid}</small><i>⏻</i>`;
+      d.onclick=e=>{if(e.target.tagName==='I'){toggleBlock(i)}else selectBlock(i)};
+    }
     (i<5?r1:r2).appendChild(d);
   });
   r2.appendChild(io('→'));
@@ -200,10 +230,15 @@ function renderPanel(){
   const ph=$('ph'),box=$('pars');box.innerHTML='';
   const b=P.blocks[P.sel];
   if(!b){ph.innerHTML='<b>Conecta para ver el preset</b>';return}
+  if(b.empty){
+    ph.style.color='#888';ph.innerHTML='<b>Campo vacío</b><button id="pm">Agregar bloque</button>';
+    $('pm').onclick=()=>openModels();return;
+  }
   const[lab,col]=catOf(b);
   ph.style.color=col;
-  ph.innerHTML=`<b>${lab} · ${b.m?b.m.n:'Modelo '+b.mid}</b><button id="pw">⏻</button>`;
+  ph.innerHTML=`<b>${lab} · ${b.m?b.m.n:'Modelo '+b.mid}</b><button id="pm">Cambiar modelo</button><button id="pw">⏻</button>`;
   $('pw').style.background=b.on?'#1c6e1c':'#444';$('pw').onclick=()=>toggleBlock(P.sel);
+  $('pm').onclick=()=>openModels();
   if(!b.m){box.innerHTML='<div style="color:#888">Sin datos de parámetros para este modelo.</div>';return}
   const ps=b.m.p,idxOf=sid=>ps.findIndex(p=>p[0]===sid);
   ps.forEach((p,i)=>{
@@ -318,21 +353,32 @@ function onMsg(s,p){
     }
   }
 }
+const NOISE=new Set([1,5,20,21,22,34]);   // eventos que no cambian el preset
 function onEvent(d){
   const t=d[105],e=d[106]||{},inner=e[106];
   if((t===4||t===8)&&inner&&inner[108]!==undefined){
     P.idx=inner[108];P.name=names[P.idx]||'';renderHead();log('EVENTO preset → '+presetLabel(P.idx),'ev');fetchPreset(true);
+  }else if(t===6&&inner&&inner[108]!==undefined&&typeof inner[109]==='string'){
+    saveName(inner[108],inner[109].replace(/\0/g,''));if(inner[108]===P.idx){P.name=names[P.idx];renderHead()}
   }else if((t===42||t===46)&&e[92]!==undefined){
     P.snap=e[92];renderSnaps();log('EVENTO snapshot → '+(P.snap+1),'ev');fetchPreset(false);
   }else if(t===49&&inner&&inner[59]!==undefined){
-    const b=P.blocks[inner[98]-1];if(b){b.on=!!inner[59];renderChain();renderPanel()}
+    const b=P.blocks[inner[98]-1];if(b&&!b.empty){b.on=!!inner[59];renderChain();renderPanel()}
   }else if(t===30&&inner&&inner[119]!==undefined){
-    const b=P.blocks[inner[98]-1];if(b){b.v[inner[28]]=inner[119];if(P.sel===inner[98]-1)renderPanel()}
+    const b=P.blocks[inner[98]-1];if(b&&!b.empty){b.v[inner[28]]=inner[119];if(P.sel===inner[98]-1)renderPanel()}
+  }else if(!NOISE.has(t)){
+    log('EVENTO '+t+' '+JSON.stringify(e).slice(0,110)+' → actualizar','ev');scheduleRefetch();
   }
+}
+let lastFetch=0,rfT=null,userTouch=0,pollT=null;
+function scheduleRefetch(){
+  clearTimeout(rfT);
+  rfT=setTimeout(()=>{if(performance.now()-lastFetch<900)return;fetchPreset(false)},300);
 }
 
 /* ---------- Comandos ---------- */
 async function fetchPreset(full){
+  lastFetch=performance.now();
   if(full){await sendCmd(S.s80,23,null)}
   await sendCmd(S.s80,22,null);
   if(full)await sendCmd(S.s80,24,M([118,73]));
@@ -346,14 +392,14 @@ async function setSnap(i){
   P.snap=i;renderSnaps();
   await sendCmd(S.s80,88,M([92,i]));await sleep(60);await sendCmd(S.s80,22,null);
 }
-function selectBlock(i){P.sel=i;renderChain();renderPanel();sendCmd(S.s80,78,M([98,P.blocks[i].id]))}
+function selectBlock(i){P.sel=i;renderChain();renderPanel();if(!P.blocks[i].empty)sendCmd(S.s80,78,M([98,P.blocks[i].id]))}
 function toggleBlock(i){
-  const b=P.blocks[i];b.on=!b.on;renderChain();if(i===P.sel)renderPanel();
+  const b=P.blocks[i];if(!b||b.empty)return;b.on=!b.on;renderChain();if(i===P.sel)renderPanel();
   sendCmd(S.s80,41,M([98,b.id],[59,b.on]));
 }
 let lastSend=0;
 function setParam(b,i,val,throttle){
-  b.v[i]=val;
+  userTouch=performance.now();b.v[i]=val;
   const now=performance.now();if(throttle&&now-lastSend<40)return;lastSend=now;
   const p=b.m.p[i];
   let a;
@@ -362,6 +408,50 @@ function setParam(b,i,val,throttle){
   else a=M([98,b.id],[29,true],[26,0],[28,i],[119,new Fl(val)]);
   sendCmd(S.s80,30,a);
 }
+
+/* ---------- Selector de modelos ---------- */
+const CLS={amp:17,preamp:17,cab:15,cabmicirs:26,compressor:1,distortion:1,wah:1,volumepan:1,delay:8,reverb:8,eq:23,sendreturn:9};
+let MODELS=null,mTab=null;
+function buildModels(){
+  if(MODELS||!DB)return;
+  const cnt={};MODELS=[];
+  DB.sym.forEach((sid,i)=>{const m=DB.m[sid];if(!m)return;MODELS.push({i,sid,n:m.n,f:m.f});const k=m.f+'|'+m.n;cnt[k]=(cnt[k]||0)+1});
+  MODELS.forEach(x=>{if(cnt[x.f+'|'+x.n]>1){const t=/Stereo/.test(x.sid)?' (Stereo)':/Mono/.test(x.sid)?' (Mono)':' ('+x.sid.replace(/^.*_/,'')+')';x.n+=t}});
+}
+function openModels(){
+  if(!DB){log('Falta models.json','er');return}
+  buildModels();
+  const b=P.blocks[P.sel];mTab=b&&!b.empty&&b.m?b.m.f:'distortion';
+  $('mq').value='';$('mm').classList.add('show');drawModels();
+}
+function drawModels(){
+  const tabs=$('tabs');tabs.innerHTML='';
+  Object.entries(DB.stems).forEach(([f,[lab,col]])=>{
+    const t=document.createElement('button');t.textContent=lab+(f==='preamp'||f==='cabmicirs'?'*':'');t.style.background=col;
+    if(f!==mTab)t.className='off';t.onclick=()=>{mTab=f;$('mq').value='';drawModels()};tabs.appendChild(t);
+  });
+  const q=$('mq').value.trim().toLowerCase(),list=$('mlist');list.innerHTML='';
+  const cur=P.blocks[P.sel];
+  MODELS.filter(x=>q?x.n.toLowerCase().includes(q):x.f===mTab).slice(0,200).forEach(x=>{
+    const t=document.createElement('button');t.textContent=x.n;if(cur&&cur.mid===x.i)t.className='cur';
+    t.onclick=()=>{$('mm').classList.remove('show');pickModel(x)};list.appendChild(t);
+  });
+}
+async function pickModel(x){
+  const b=P.blocks[P.sel];if(!b)return;
+  let cls=CLS[x.f];
+  if(b.empty){
+    if(cls===undefined){cls=1;log('Clase de bloque sin confirmar para '+x.f+', probando con 1','er')}
+    await sendCmd(S.s80,28,M([98,b.id]));await sleep(60);
+    await sendCmd(S.s80,39,M([98,b.id],[99,M([19,6],[20,M([24,M([23,false],[25,x.i],[26,-1])],[9,cls],[10,true])])]));
+    log(`→ agregar ${x.n} en bloque ${b.id}`,'ok');
+  }else{
+    await sendCmd(S.s80,40,M([98,b.id],[100,M([23,false],[25,x.i],[26,-1])]));
+    log(`→ bloque ${b.id}: ${x.n}`,'ok');
+  }
+  await sleep(100);await sendCmd(S.s80,23,null);await sendCmd(S.s80,22,null);
+}
+$('mq').oninput=drawModels;$('mmClose').onclick=()=>$('mm').classList.remove('show');
 
 /* ---------- Conexión ---------- */
 async function connect(){
@@ -383,11 +473,16 @@ async function connect(){
                 [S.s80,24,M([118,14])],[S.s80,24,M([118,15])],[S.s80,24,M([118,73])],[S.s01,13,M([101,2])]];
     for(const [s,c,a] of init){await sendCmd(s,c,a);await sleep(70)}
     kaT=setInterval(()=>{for(const s of SL)keep(s)},1000);
+    clearInterval(pollT);
+    pollT=setInterval(()=>{
+      const now=performance.now();
+      if(run&&$('auto').checked&&now-userTouch>2500&&now-lastFetch>2500)fetchPreset(false);
+    },3000);
     $('state').textContent='conectado';$('bCon').textContent='Desconectar';$('bCon').className='on';
   }catch(e){log('Error: '+e.message,'er');$('state').textContent='error: '+e.message}
 }
 async function disconnect(){
-  run=false;clearInterval(kaT);
+  run=false;clearInterval(kaT);clearInterval(pollT);
   try{await dev.releaseInterface(0);await dev.close()}catch(e){}
   $('state').textContent='sin conexión';$('bCon').textContent='Conectar';$('bCon').className='';
 }
