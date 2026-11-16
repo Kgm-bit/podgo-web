@@ -42,6 +42,7 @@
   .seg button.a{background:var(--ac);color:#000;font-weight:700}
   .blk.empty{background:#181818!important;border:2px dashed #444;color:#777;text-shadow:none;font-weight:400}
   .blk.empty.sel{border-color:#fff}
+  #toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:#a33;color:#fff;padding:10px 16px;border-radius:10px;z-index:20;display:none;max-width:90%;font-size:14px;text-align:center}
   #mm{position:fixed;inset:0;background:#000e;z-index:10;display:none;overflow:auto;padding:10px}
   #mm.show{display:block}
   #mm .in{max-width:520px;margin:0 auto}
@@ -68,11 +69,12 @@
   <button id="bCon">Conectar</button>
 </header>
 <div id="state">Conecta la POD Go con el cable OTG y pulsa Conectar.</div>
-<label style="display:block;font-size:12px;color:#8a8a8a;padding:0 10px 4px"><input type="checkbox" id="auto" checked> Auto-actualizar (detecta cambios hechos en la pedalera)</label>
+<label style="display:block;font-size:12px;color:#8a8a8a;padding:0 10px 4px"><input type="checkbox" id="auto" checked> Auto-actualizar cada 5 s (detecta cambios hechos en la pedalera)</label>
 <div id="snaps"></div>
 <div id="chain"><div class="row" id="r1"></div><div class="row" id="r2"></div></div>
 <div id="panel"><div id="ph"><b>Conecta para ver el preset</b></div><div id="pars"></div></div>
 
+<div id="toast"></div>
 <div id="modal"><div style="max-width:520px;margin:0 auto 8px;text-align:right"><button id="mClose">Cerrar ✕</button></div><div id="grid"></div></div>
 
 <div id="mm"><div class="in"><div style="text-align:right"><button id="mmClose">Cerrar ✕</button></div>
@@ -87,6 +89,8 @@
 const $=id=>document.getElementById(id);
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const hex=(u,n=60)=>Array.from(u.slice(0,n)).map(x=>x.toString(16).padStart(2,'0')).join(' ');
+let toastT=null;
+function toast(m){const t=$('toast');t.textContent=m;t.style.display='block';clearTimeout(toastT);toastT=setTimeout(()=>{t.style.display='none'},4000)}
 function log(m,c){const s=document.createElement('div');if(c)s.className=c;s.textContent=m;$('log').appendChild(s);$('log').scrollTop=1e9}
 const presetLabel=i=>String(Math.floor(i/4)+1).padStart(2,'0')+'ABCD'[i%4];
 
@@ -180,8 +184,19 @@ function modelOf(bl){
   if(!DB)return null;
   const sid=DB.sym[bl.mid];return sid?{sid,m:DB.m[sid]||null}:null;
 }
-let lastSig='';
+let lastSig='',dumpWaiters=[];
+function waitDump(ms){return new Promise(res=>{const w={res};dumpWaiters.push(w);setTimeout(()=>{const k=dumpWaiters.indexOf(w);if(k>=0){dumpWaiters.splice(k,1);res(false)}},ms)})}
+function applyBlockDef(id,def){
+  const i=id-1;if(i<0||i>9)return;
+  const c=def&&def[20];
+  if(c&&c[24]&&c[24][25]!==undefined){
+    const b={mid:c[24][25],on:c[10]!==false,v:((c[11]&&c[11][4])||[]).slice()},mo=modelOf(b);
+    P.blocks[i]={id,empty:false,mid:b.mid,on:b.on,v:b.v,sid:mo&&mo.sid,m:mo&&mo.m};
+  }else P.blocks[i]={id,empty:true,on:false,v:[]};
+  lastSig='';render();
+}
 function applyDump(str){
+  const w=dumpWaiters.splice(0);w.forEach(x=>x.res(true));
   const r=parsePreset(str);
   const nb=r.blocks.map((b,i)=>{
     if(b.empty)return{id:i+1,empty:true,on:false,v:[]};
@@ -326,12 +341,17 @@ function onIn(b){
   if(b.length<=16)return;
   ack(s);
   const dv=new DataView(b.buffer,b.byteOffset,b.byteLength);
+  const now=performance.now();
+  const hdr=b.length>=24&&b[16]===0&&b[17]===0&&b[18]===s.ch&&b[19]===0;
+  if(s.rx&&s.rx.got<s.rx.plen&&(hdr||now-s.rx.t>1500)){log(`mensaje incompleto descartado en s${s.n} (${s.rx.got}/${s.rx.plen})`,'er');s.rx=null}
   if(s.rx&&s.rx.got<s.rx.plen){
     const take=Math.min(s.rx.plen-s.rx.got,b.length-16);
-    s.rx.parts.push(b.slice(16,16+take));s.rx.got+=take;
+    s.rx.parts.push(b.slice(16,16+take));s.rx.got+=take;s.rx.t=now;
   }else{
-    const plen=dv.getUint32(20,true),take=Math.min(plen,b.length-24);
-    s.rx={plen,got:take,parts:[b.slice(24,24+take)]};
+    const plen=dv.getUint32(20,true);
+    if(plen>200000||b.length<24){log('cabecera de mensaje inválida','er');return}
+    const take=Math.min(plen,b.length-24);
+    s.rx={plen,got:take,parts:[b.slice(24,24+take)],t:now};
   }
   if(s.rx.got>=s.rx.plen){
     const all=new Uint8Array(s.rx.plen);let o=0;for(const p of s.rx.parts){all.set(p,o);o+=p.length}
@@ -345,6 +365,8 @@ function onMsg(s,p){
   if(s===S.s02&&d&&d[105]!==undefined){onEvent(d);return}
   if(s===S.s80&&d){
     const r=d[104];
+    if(d[103]!==undefined&&d[103]!==0){log('ERROR de la pedalera, estado '+d[103]+' '+JSON.stringify(r).slice(0,100),'er');toast('La pedalera rechazó un comando (estado '+d[103]+')')}
+    if(r&&typeof r==='object'&&!Array.isArray(r)&&r[13]!==undefined&&r[24]&&typeof r[24]==='object'){applyBlockDef(r[13],r[24]);return}
     if(typeof r==='string'&&r.slice(1,9)==='l6-helix'){try{applyDump(r)}catch(e){log('Error al leer preset: '+e.message,'er')}return}
     if(r&&typeof r==='object'&&!Array.isArray(r)&&r[108]!==undefined&&typeof r[109]==='string'){
       P.idx=r[108];P.name=r[109].replace(/\0/g,'');saveName(P.idx,P.name);
@@ -373,7 +395,8 @@ function onEvent(d){
 let lastFetch=0,rfT=null,userTouch=0,pollT=null;
 function scheduleRefetch(){
   clearTimeout(rfT);
-  rfT=setTimeout(()=>{if(performance.now()-lastFetch<900)return;fetchPreset(false)},300);
+  const wait=Math.max(300,900-(performance.now()-lastFetch));
+  rfT=setTimeout(()=>fetchPreset(false),wait);
 }
 
 /* ---------- Comandos ---------- */
@@ -411,7 +434,15 @@ function setParam(b,i,val,throttle){
 
 /* ---------- Selector de modelos ---------- */
 const CLS={amp:17,preamp:17,cab:15,cabmicirs:26,compressor:1,distortion:1,wah:1,volumepan:1,delay:8,reverb:8,eq:23,sendreturn:9};
-let MODELS=null,mTab=null;
+let MODELS=null,mTab=null,busy=false;
+const EFFECT=['distortion','compressor','gate','eq','filter','modulation','pitch-synth','reverb','delay','wah','volumepan','sendreturn'];
+function allowedStems(b){
+  if(!b||b.empty)return Object.keys(DB.stems).filter(f=>f!=='io'&&f!=='fixed');
+  const f=b.m&&b.m.f;
+  if(f==='amp'||f==='preamp')return['amp','preamp'];
+  if(f==='cab'||f==='cabmicirs')return['cab','cabmicirs'];
+  return EFFECT;
+}
 function buildModels(){
   if(MODELS||!DB)return;
   const cnt={};MODELS=[];
@@ -421,35 +452,48 @@ function buildModels(){
 function openModels(){
   if(!DB){log('Falta models.json','er');return}
   buildModels();
-  const b=P.blocks[P.sel];mTab=b&&!b.empty&&b.m?b.m.f:'distortion';
+  const b=P.blocks[P.sel],al=allowedStems(b);mTab=b&&!b.empty&&b.m&&al.includes(b.m.f)?b.m.f:al[0];
   $('mq').value='';$('mm').classList.add('show');drawModels();
 }
 function drawModels(){
   const tabs=$('tabs');tabs.innerHTML='';
-  Object.entries(DB.stems).forEach(([f,[lab,col]])=>{
+  const al=allowedStems(P.blocks[P.sel]);
+  Object.entries(DB.stems).filter(([f])=>al.includes(f)).forEach(([f,[lab,col]])=>{
     const t=document.createElement('button');t.textContent=lab+(f==='preamp'||f==='cabmicirs'?'*':'');t.style.background=col;
     if(f!==mTab)t.className='off';t.onclick=()=>{mTab=f;$('mq').value='';drawModels()};tabs.appendChild(t);
   });
   const q=$('mq').value.trim().toLowerCase(),list=$('mlist');list.innerHTML='';
   const cur=P.blocks[P.sel];
-  MODELS.filter(x=>q?x.n.toLowerCase().includes(q):x.f===mTab).slice(0,200).forEach(x=>{
+  MODELS.filter(x=>al.includes(x.f)&&(q?x.n.toLowerCase().includes(q):x.f===mTab)).slice(0,200).forEach(x=>{
     const t=document.createElement('button');t.textContent=x.n;if(cur&&cur.mid===x.i)t.className='cur';
     t.onclick=()=>{$('mm').classList.remove('show');pickModel(x)};list.appendChild(t);
   });
 }
 async function pickModel(x){
+  if(busy){toast('Espera a que termine el cambio anterior');return}
   const b=P.blocks[P.sel];if(!b)return;
-  let cls=CLS[x.f];
-  if(b.empty){
-    if(cls===undefined){cls=1;log('Clase de bloque sin confirmar para '+x.f+', probando con 1','er')}
-    await sendCmd(S.s80,28,M([98,b.id]));await sleep(60);
-    await sendCmd(S.s80,39,M([98,b.id],[99,M([19,6],[20,M([24,M([23,false],[25,x.i],[26,-1])],[9,cls],[10,true])])]));
-    log(`→ agregar ${x.n} en bloque ${b.id}`,'ok');
-  }else{
-    await sendCmd(S.s80,40,M([98,b.id],[100,M([23,false],[25,x.i],[26,-1])]));
-    log(`→ bloque ${b.id}: ${x.n}`,'ok');
-  }
-  await sleep(100);await sendCmd(S.s80,23,null);await sendCmd(S.s80,22,null);
+  busy=true;
+  try{
+    const id=b.id;let cls=CLS[x.f];
+    if(b.empty){
+      // comprobar con un volcado reciente que el hueco sigue vacío (nunca se envía ningún borrado)
+      await sendCmd(S.s80,23,null);await sendCmd(S.s80,22,null);
+      const ok=await waitDump(1500),cur=P.blocks[id-1];
+      if(!ok||!cur||!cur.empty){toast('No se pudo confirmar que el campo esté vacío; no se agregó nada');log('Agregar cancelado: campo no confirmado vacío','er');return}
+      if(cls===undefined){cls=1;log('Clase de bloque sin confirmar para '+x.f+', probando con 1','er')}
+      await sendCmd(S.s80,39,M([98,id],[99,M([19,6],[20,M([24,M([23,false],[25,x.i],[26,-1])],[9,cls],[10,true])])]));
+      log(`→ agregar ${x.n} en bloque ${id}`,'ok');
+    }else{
+      await sendCmd(S.s80,40,M([98,id],[100,M([23,false],[25,x.i],[26,-1])]));
+      log(`→ bloque ${id}: ${x.n}`,'ok');
+    }
+    await sleep(120);await sendCmd(S.s80,23,null);await sendCmd(S.s80,22,null);
+    if(x.f==='amp'||x.f==='preamp'){ // igual que POD Go Edit: el gabinete puede cambiar con el amp
+      await sleep(120);await sendCmd(S.s80,24,M([118,118]));await sendCmd(S.s80,45,M([98,id+1]));
+      await sleep(80);await sendCmd(S.s80,23,null);await sendCmd(S.s80,22,null);
+    }
+    setTimeout(()=>{const c=P.blocks[id-1];if(!c||c.empty||c.mid!==x.i){toast('El cambio no se aplicó en la pedalera');log('Verificación: el bloque '+id+' no cambió a '+x.n,'er')}},1800);
+  }finally{busy=false}
 }
 $('mq').oninput=drawModels;$('mmClose').onclick=()=>$('mm').classList.remove('show');
 
@@ -476,8 +520,8 @@ async function connect(){
     clearInterval(pollT);
     pollT=setInterval(()=>{
       const now=performance.now();
-      if(run&&$('auto').checked&&now-userTouch>2500&&now-lastFetch>2500)fetchPreset(false);
-    },3000);
+      if(run&&!busy&&$('auto').checked&&now-userTouch>2500&&now-lastFetch>4000)fetchPreset(false);
+    },5000);
     $('state').textContent='conectado';$('bCon').textContent='Desconectar';$('bCon').className='on';
   }catch(e){log('Error: '+e.message,'er');$('state').textContent='error: '+e.message}
 }
