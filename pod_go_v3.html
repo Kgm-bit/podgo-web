@@ -72,13 +72,23 @@
 <label style="display:block;font-size:12px;color:#8a8a8a;padding:0 10px 4px"><input type="checkbox" id="auto" checked> Auto-actualizar cada 5 s (detecta cambios hechos en la pedalera)</label>
 <div id="snaps"></div>
 <div id="chain"><div class="row" id="r1"></div><div class="row" id="r2"></div></div>
+<div style="padding:6px 10px 0"><button id="undo" style="display:none;background:#555">↶ Deshacer último movimiento</button></div>
 <div id="panel"><div id="ph"><b>Conecta para ver el preset</b></div><div id="pars"></div></div>
 
 <div id="toast"></div>
 <div id="modal"><div style="max-width:520px;margin:0 auto 8px;text-align:right"><button id="mClose">Cerrar ✕</button></div><div id="grid"></div></div>
 
 <div id="mm"><div class="in"><div style="text-align:right"><button id="mmClose">Cerrar ✕</button></div>
-  <input id="mq" type="search" placeholder="Buscar modelo…"><div id="tabs"></div><div id="mlist"></div></div></div>
+  <input id="mq" type="search" placeholder="Buscar por modelo o equipo (ej. klon, tube screamer)…"><div id="tabs"></div><div id="mlist"></div></div></div>
+
+<details id="audio"><summary>Audio: enviar sonido a la POD Go</summary>
+  <div style="margin:8px 0;color:#aaa;font-size:13px;line-height:1.4">Baja el volumen de tu amplificador antes de probar. Para que el navegador pueda ver los nombres de las salidas pide permiso de micrófono (no se graba nada).</div>
+  <button id="aScan">Buscar salidas de audio</button>
+  <select id="aSel" style="width:100%;margin:8px 0;padding:10px;font-size:15px;background:#222;color:#fff;border:1px solid #444;border-radius:8px"></select>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><button id="aTone">Tono de prueba</button><input type="file" id="aFile" accept="audio/*" style="max-width:100%"></div>
+  <audio id="aEl" controls style="width:100%;margin-top:8px"></audio>
+  <div id="aMsg" style="font-size:13px;margin-top:6px;color:#ccc;line-height:1.4"></div>
+</details>
 
 <details><summary>Registro</summary>
   <div style="margin:6px 0"><button id="bCopy">Copiar</button> <button id="bClr">Limpiar</button></div>
@@ -196,6 +206,7 @@ function applyBlockDef(id,def){
   lastSig='';render();
 }
 function applyDump(str){
+  P.raw=Uint8Array.from(str,c=>c.charCodeAt(0)&255);
   const w=dumpWaiters.splice(0);w.forEach(x=>x.res(true));
   const r=parsePreset(str);
   const nb=r.blocks.map((b,i)=>{
@@ -251,7 +262,8 @@ function renderPanel(){
   }
   const[lab,col]=catOf(b);
   ph.style.color=col;
-  ph.innerHTML=`<b>${lab} · ${b.m?b.m.n:'Modelo '+b.mid}</b><button id="pm">Cambiar modelo</button><button id="pw">⏻</button>`;
+  ph.innerHTML=`<b>${lab} · ${b.m?b.m.n:'Modelo '+b.mid}${b.m&&b.m.b?'<br><small style="font-weight:400;color:#9a9a9a;font-size:13px">'+basedTxt(b.m.b)+'</small>':''}</b><button id="mvL">◀</button><button id="mvR">▶</button><button id="pm">Cambiar modelo</button><button id="pw">⏻</button>`;
+  $('mvL').onclick=()=>moveBlock(-1);$('mvR').onclick=()=>moveBlock(1);
   $('pw').style.background=b.on?'#1c6e1c':'#444';$('pw').onclick=()=>toggleBlock(P.sel);
   $('pm').onclick=()=>openModels();
   if(!b.m){box.innerHTML='<div style="color:#888">Sin datos de parámetros para este modelo.</div>';return}
@@ -432,9 +444,134 @@ function setParam(b,i,val,throttle){
   sendCmd(S.s80,30,a);
 }
 
+/* ---------- Mover bloques (intercambio de posiciones contiguas) ---------- */
+function spn(b,i){
+  const t=b[i],nd=(tp,e,v,k)=>({t:tp,s:i,e,v,k});
+  if(t<=0x7f||t>=0xe0)return nd('int',i+1,t<=0x7f?t:t-256);
+  if((t>=0x80&&t<=0x8f)||t===0xde){
+    let n,j;if(t===0xde){n=(b[i+1]<<8)|b[i+2];j=i+3}else{n=t&15;j=i+1}
+    const kids=[];for(let q=0;q<n;q++){const k=spn(b,j),v=spn(b,k.e);j=v.e;kids.push([k,v])}
+    return nd('map',j,null,kids);
+  }
+  if((t>=0x90&&t<=0x9f)||t===0xdc){
+    let n,j;if(t===0xdc){n=(b[i+1]<<8)|b[i+2];j=i+3}else{n=t&15;j=i+1}
+    const kids=[];for(let q=0;q<n;q++){const v=spn(b,j);j=v.e;kids.push(v)}
+    return nd('arr',j,null,kids);
+  }
+  const[v,j]=dec(b,i);return nd('leaf',j,v);
+}
+const mg=(n,key)=>{if(!n||n.t!=='map')return null;for(const[k,v]of n.k)if(k.v===key)return v;return null};
+const BLOCKED=new Set(['amp','preamp','cab','cabmicirs']);
+// Devuelve el preset con las posiciones p y p+1 intercambiadas (igual que POD Go Edit) o lanza un Error explicando por qué no.
+function swapBlocks(blob,p,movedTo){
+  const b=Uint8Array.from(blob);
+  if(!(b[10]===0xda&&b[11]===0&&b[12]===0x30))throw new Error('formato de preset desconocido');
+  const root=spn(b,61);if(root.e!==b.length||root.t!=='map')throw new Error('estructura de preset inesperada');
+  const chain=mg(mg(root,0),22);if(!chain||chain.k.length!==12)throw new Error('cadena no encontrada');
+  const e1=chain.k[p],e2=chain.k[p+1];
+  const c1=mg(e1,20),c2=mg(e2,20);
+  if(!c1||!c2||c1.t!=='map'||c2.t!=='map')throw new Error('Por ahora solo puedo intercambiar dos bloques con modelo (no campos vacíos)');
+  for(const c of[c1,c2]){
+    const mid=mg(mg(c,24),25),sid=mid&&DB&&DB.sym[mid.v],f=sid&&DB.m[sid]&&DB.m[sid].f;
+    if(!f)throw new Error('modelo desconocido');
+    if(BLOCKED.has(f))throw new Error('Mover el amp o el gabinete aún no está soportado (cambia el enrutado interno)');
+  }
+  // asignaciones de pedal/footswitch que apuntan a estos bloques (/4[k][*]/1/5): aún no sé reordenarlas
+  const l4=mg(root,4);
+  if(l4)for(const n of l4.k){
+    if(n.t!=='arr')continue;
+    for(const d of n.k){const v=mg(mg(d,1),5);if(v&&v.t==='int'&&(v.v===p||v.v===p+1))throw new Error('Ese bloque tiene un pedal o footswitch asignado; aún no puedo moverlo sin perder la asignación')}
+  }
+  // referencias de controladores a posiciones: /3/8[i][*]/11/8
+  const l38=mg(mg(root,3),8);
+  if(l38)for(const it of l38.k){
+    if(it.t!=='arr')continue;
+    for(const d of it.k){
+      const r=mg(mg(d,11),8);
+      if(r&&r.t==='int'&&r.v>=0&&r.v<128){if(r.v===p)b[r.s]=p+1;else if(r.v===p+1)b[r.s]=p}
+    }
+  }
+  // banderas de encendido por snapshot: /10/10[s]/3[p][1]
+  const sn=mg(mg(root,10),10);
+  if(sn)for(const s_ of sn.k){
+    const l3=mg(s_,3);if(!l3)continue;
+    const x=l3.k[p].k[1],y=l3.k[p+1].k[1];
+    if(x.e-x.s!==1||y.e-y.s!==1)throw new Error('banderas de snapshot inesperadas');
+    const t=b[x.s];b[x.s]=b[y.s];b[y.s]=t;
+  }
+  // bloque seleccionado
+  const r98=mg(mg(root,6),98);if(r98&&r98.t==='int')b[r98.s]=movedTo;
+  // códigos de clase como los envía el editor (9→8, 23→1, 26→1)
+  for(let k=1;k<=10;k++){
+    const c=mg(chain.k[k],20);if(!c||c.t!=='map')continue;
+    const n9=mg(c,9);if(n9&&n9.t==='int'&&n9.e-n9.s===1){const v=n9.v;if(v===9)b[n9.s]=8;else if(v===23||v===26)b[n9.s]=1}
+  }
+  // intercambio de entradas
+  if(e1.e!==e2.s)throw new Error('entradas no contiguas');
+  const A=b.slice(e1.s,e1.e),B=b.slice(e2.s,e2.e);
+  b.set(B,e1.s);b.set(A,e1.s+B.length);
+  // el editor añade la clave 12 (128 cadenas vacías) al final
+  let out=b;
+  if(!mg(root,12)){
+    const n=root.k.length;if(b[61]!==(0x80|n)||n>=15)throw new Error('mapa raíz inesperado');
+    const add=[0x0c,0xdc,0x00,0x80];for(let q=0;q<128;q++)add.push(0xa1,0x00);
+    out=new Uint8Array(b.length+add.length);out.set(b);out.set(add,b.length);out[61]=0x80|(n+1);
+  }
+  return out;
+}
+async function sendBig(s,msg){
+  // msg: bytes del mensaje MessagePack; se envía en tramas de ≤496 bytes de datos
+  const n=msg.length,head=[1,0,s.ch,0,n&255,(n>>8)&255,(n>>16)&255,0];
+  let off=0,first=true;
+  while(off<n||first){
+    const room=first?488:496,take=Math.min(room,n-off);
+    const body=first?[...head,...msg.subarray(off,off+take)]:Array.from(msg.subarray(off,off+take));
+    await out(frame(s,0x04,body));await sleep(4);
+    off+=take;first=false;
+  }
+}
+async function sendPreset(blobBytes){
+  const s=S.s80,ctr=s.mc++,n=blobBytes.length;
+  const pre=[0x83,0x66,0xcd,ctr>>8,ctr&255,0x64,0x15,0x65,0x81,0x6e,0xda,n>>8,n&255];
+  const msg=new Uint8Array(pre.length+n);msg.set(pre);msg.set(blobBytes,pre.length);
+  await sendBig(s,msg);
+}
+const sigOrder=()=>P.blocks.map(b=>b.empty?'-':b.mid).join(',');
+async function moveBlock(dir){
+  if(busy){toast('Espera a que termine la operación anterior');return}
+  const i=P.sel,b=P.blocks[i];if(!b||b.empty)return;
+  const p=dir<0?i-1:i;                     // posición izquierda del par (índice de bloque = i+1)
+  if(dir<0&&i===0||dir>0&&i===P.blocks.length-1){toast('No se puede mover más en esa dirección');return}
+  busy=true;
+  try{
+    await sendCmd(S.s80,22,null);const ok=await waitDump(1500);
+    if(!ok||!P.raw){toast('No pude leer el preset actual; no se movió nada');return}
+    const before=sigOrder(),backup=P.raw.slice();
+    let nb;
+    try{nb=swapBlocks(P.raw,p+1,dir<0?p+1:p+2)}catch(e){toast(e.message);log('Mover cancelado: '+e.message,'er');return}
+    P.undo=backup;
+    await sendPreset(nb);log(`→ mover bloque ${i+1} ${dir<0?'a la izquierda':'a la derecha'}`,'ok');
+    await sleep(700);await sendCmd(S.s80,22,null);await waitDump(2000);
+    const after=sigOrder(),exp=before.split(',');const t=exp[p];exp[p]=exp[p+1];exp[p+1]=t;
+    if(after===exp.join(',')){P.sel=i+dir;render();toast2('Bloque movido');}
+    else if(after===before){toast('La pedalera no aplicó el movimiento');log('Verificación: el orden no cambió','er')}
+    else{toast('Resultado inesperado; restaurando el preset anterior');log('Verificación fallida, restaurando','er');await sendPreset(P.undo);await sleep(700);await sendCmd(S.s80,22,null)}
+    $('undo').style.display=P.undo?'inline-block':'none';
+  }catch(e){toast('Error al mover: '+e.message);log('Mover: '+e.message,'er')}
+  finally{busy=false}
+}
+async function undoMove(){
+  if(!P.undo||busy)return;busy=true;
+  try{await sendPreset(P.undo);log('→ deshacer movimiento','ok');await sleep(700);await sendCmd(S.s80,22,null);P.undo=null;$('undo').style.display='none'}
+  catch(e){toast('Error al deshacer: '+e.message)}finally{busy=false}
+}
+function toast2(m){const t=$('toast');t.style.background='#1c6e1c';t.textContent=m;t.style.display='block';clearTimeout(toastT);toastT=setTimeout(()=>{t.style.display='none';t.style.background='#a33'},2000)}
+
 /* ---------- Selector de modelos ---------- */
 const CLS={amp:17,preamp:17,cab:15,cabmicirs:26,compressor:1,distortion:1,wah:1,volumepan:1,delay:8,reverb:8,eq:23,sendreturn:9};
 let MODELS=null,mTab=null,busy=false;
+const nz=t=>t.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[®™’']/g,'').replace(/[^a-z0-9]+/g,' ').trim();
+const basedTxt=b=>b==='Line 6 Original'?'Diseño original de Line 6':b;
 const EFFECT=['distortion','compressor','gate','eq','filter','modulation','pitch-synth','reverb','delay','wah','volumepan','sendreturn'];
 function allowedStems(b){
   if(!b||b.empty)return Object.keys(DB.stems).filter(f=>f!=='io'&&f!=='fixed');
@@ -446,8 +583,8 @@ function allowedStems(b){
 function buildModels(){
   if(MODELS||!DB)return;
   const cnt={};MODELS=[];
-  DB.sym.forEach((sid,i)=>{const m=DB.m[sid];if(!m)return;MODELS.push({i,sid,n:m.n,f:m.f});const k=m.f+'|'+m.n;cnt[k]=(cnt[k]||0)+1});
-  MODELS.forEach(x=>{if(cnt[x.f+'|'+x.n]>1){const t=/Stereo/.test(x.sid)?' (Stereo)':/Mono/.test(x.sid)?' (Mono)':' ('+x.sid.replace(/^.*_/,'')+')';x.n+=t}});
+  DB.sym.forEach((sid,i)=>{const m=DB.m[sid];if(!m)return;MODELS.push({i,sid,n:m.n,f:m.f,b:m.b||''});const k=m.f+'|'+m.n;cnt[k]=(cnt[k]||0)+1});
+  MODELS.forEach(x=>{x.h=nz(x.n+' '+x.b);if(cnt[x.f+'|'+x.n]>1){const t=/Stereo/.test(x.sid)?' (Stereo)':/Mono/.test(x.sid)?' (Mono)':' ('+x.sid.replace(/^.*_/,'')+')';x.n+=t}});
 }
 function openModels(){
   if(!DB){log('Falta models.json','er');return}
@@ -462,10 +599,14 @@ function drawModels(){
     const t=document.createElement('button');t.textContent=lab+(f==='preamp'||f==='cabmicirs'?'*':'');t.style.background=col;
     if(f!==mTab)t.className='off';t.onclick=()=>{mTab=f;$('mq').value='';drawModels()};tabs.appendChild(t);
   });
-  const q=$('mq').value.trim().toLowerCase(),list=$('mlist');list.innerHTML='';
+  const toks=nz($('mq').value).split(' ').filter(Boolean),list=$('mlist');list.innerHTML='';
   const cur=P.blocks[P.sel];
-  MODELS.filter(x=>al.includes(x.f)&&(q?x.n.toLowerCase().includes(q):x.f===mTab)).slice(0,200).forEach(x=>{
-    const t=document.createElement('button');t.textContent=x.n;if(cur&&cur.mid===x.i)t.className='cur';
+  MODELS.filter(x=>al.includes(x.f)&&(toks.length?toks.every(k=>x.h.includes(k)):x.f===mTab)).slice(0,200).forEach(x=>{
+    const t=document.createElement('button');
+    const nm=document.createElement('div');nm.textContent=x.n;t.appendChild(nm);
+    if(x.b){const sm=document.createElement('small');sm.textContent=basedTxt(x.b);sm.style.cssText='display:block;color:#9a9a9a;font-size:12px;margin-top:2px';t.appendChild(sm)}
+    if(toks.length){const tag=document.createElement('small');tag.textContent=(DB.stems[x.f]||[''])[0];tag.style.cssText='display:block;color:#666;font-size:11px';t.appendChild(tag)}
+    if(cur&&cur.mid===x.i)t.className='cur';
     t.onclick=()=>{$('mm').classList.remove('show');pickModel(x)};list.appendChild(t);
   });
 }
@@ -495,7 +636,7 @@ async function pickModel(x){
     setTimeout(()=>{const c=P.blocks[id-1];if(!c||c.empty||c.mid!==x.i){toast('El cambio no se aplicó en la pedalera');log('Verificación: el bloque '+id+' no cambió a '+x.n,'er')}},1800);
   }finally{busy=false}
 }
-$('mq').oninput=drawModels;$('mmClose').onclick=()=>$('mm').classList.remove('show');
+$('mq').oninput=drawModels;$('undo').onclick=undoMove;$('mmClose').onclick=()=>$('mm').classList.remove('show');
 
 /* ---------- Conexión ---------- */
 async function connect(){
@@ -531,6 +672,47 @@ async function disconnect(){
   $('state').textContent='sin conexión';$('bCon').textContent='Conectar';$('bCon').className='';
 }
 $('bCon').onclick=()=>run?disconnect():connect();
+
+/* ---------- Audio: enviar sonido a la POD Go ---------- */
+const aMsg=t=>{$('aMsg').textContent=t};
+async function scanAudio(){
+  try{
+    if(!navigator.mediaDevices){aMsg('Este navegador no permite listar dispositivos de audio.');return}
+    try{const st=await navigator.mediaDevices.getUserMedia({audio:true});st.getTracks().forEach(t=>t.stop())}catch(e){log('Micrófono: '+e.message,'er')}
+    const ds=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='audiooutput');
+    const sel=$('aSel');sel.innerHTML='';
+    ds.forEach(d=>sel.add(new Option(d.label||('Salida '+d.deviceId.slice(0,6)),d.deviceId)));
+    const pod=ds.find(d=>/pod\s*go|line\s*6/i.test(d.label));
+    if(pod){sel.value=pod.deviceId;aMsg('POD Go detectada como salida de audio. Pulsa "Tono de prueba" o carga un archivo.')}
+    else if(!ds.length)aMsg('El navegador no lista salidas de audio.');
+    else aMsg('La POD Go no aparece como salida de audio. En Windows instala el driver de Line 6 y elígela en Sonido; en Android el sistema debe exponerla como salida USB.');
+    log('Salidas de audio: '+ds.map(d=>d.label).join(' | '),'ok');
+  }catch(e){aMsg('Error: '+e.message);log('Audio: '+e.message,'er')}
+}
+async function aRoute(el){
+  const id=$('aSel').value;
+  if(!id)return true;
+  if(!el.setSinkId){aMsg('Este navegador no permite elegir la salida de audio desde la página (en Android no está disponible). El sonido saldrá por la salida predeterminada del sistema.');return false}
+  try{await el.setSinkId(id);return true}catch(e){aMsg('No se pudo usar esa salida: '+e.message);return false}
+}
+$('aScan').onclick=scanAudio;
+$('aSel').onchange=()=>aRoute($('aEl'));
+$('aTone').onclick=async()=>{
+  try{
+    const ctx=new AudioContext();
+    if(ctx.setSinkId&&$('aSel').value)await ctx.setSinkId($('aSel').value);
+    else if($('aSel').value)aMsg('Este navegador no permite elegir la salida para el tono; sale por la predeterminada.');
+    const o=ctx.createOscillator(),g=ctx.createGain();o.frequency.value=440;g.gain.value=0.06;
+    o.connect(g);g.connect(ctx.destination);o.start();
+    setTimeout(()=>{o.stop();ctx.close()},1500);
+  }catch(e){aMsg('Error en el tono: '+e.message)}
+};
+$('aFile').onchange=async e=>{
+  const f=e.target.files[0];if(!f)return;
+  const el=$('aEl');el.src=URL.createObjectURL(f);
+  const ok=await aRoute(el);if(ok&&$('aSel').value)aMsg('Reproduciendo hacia la salida elegida.');
+  el.play().catch(()=>{});
+};
 
 /* ---------- Selector de preset ---------- */
 function openGrid(){
