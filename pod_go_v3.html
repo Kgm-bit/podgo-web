@@ -42,6 +42,17 @@
   .seg button.a{background:var(--ac);color:#000;font-weight:700}
   .blk.empty{background:#181818!important;border:2px dashed #444;color:#777;text-shadow:none;font-weight:400}
   .blk.empty.sel{border-color:#fff}
+  input[type=range]{touch-action:pan-y}
+  .vbtn{background:#2f2f2f;border-radius:8px;padding:4px 10px;font-size:14px;font-variant-numeric:tabular-nums}
+  #tempo{display:flex;align-items:center;gap:8px;padding:0 10px 8px}
+  #tempo b{color:#9a9a9a;font-weight:400;font-size:13px}
+  #tBpm{min-width:110px;font-size:17px}
+  #tTap{flex:1;background:var(--ac);color:#000;font-weight:700;font-size:18px;padding:14px}
+  #nm{position:fixed;inset:0;background:#000c;z-index:30;display:none;align-items:center;justify-content:center}
+  #nm.show{display:flex}
+  #nm .box{background:#222;border-radius:12px;padding:16px;width:86%;max-width:360px}
+  #nm input,#nm select{width:100%;font-size:20px;padding:10px;margin:10px 0;border-radius:8px;border:1px solid #555;background:#111;color:#fff}
+  #nm .acts{display:flex;gap:8px;justify-content:flex-end}
   #toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:#a33;color:#fff;padding:10px 16px;border-radius:10px;z-index:20;display:none;max-width:90%;font-size:14px;text-align:center}
   #mm{position:fixed;inset:0;background:#000e;z-index:10;display:none;overflow:auto;padding:10px}
   #mm.show{display:block}
@@ -71,11 +82,13 @@
 <div id="state">Conecta la POD Go con el cable OTG y pulsa Conectar.</div>
 <label style="display:block;font-size:12px;color:#8a8a8a;padding:0 10px 4px"><input type="checkbox" id="auto" checked> Auto-actualizar cada 5 s (detecta cambios hechos en la pedalera)</label>
 <div id="snaps"></div>
+<div id="tempo"><b>Tempo</b><button id="tBpm" class="vbtn">— BPM</button><button id="tTap">TAP</button></div>
 <div id="chain"><div class="row" id="r1"></div><div class="row" id="r2"></div></div>
 <div style="padding:6px 10px 0"><button id="undo" style="display:none;background:#555">↶ Deshacer último movimiento</button></div>
 <div id="panel"><div id="ph"><b>Conecta para ver el preset</b></div><div id="pars"></div></div>
 
 <div id="toast"></div>
+<div id="nm"><div class="box"><div id="nmT" style="font-size:17px"></div><input id="nmI" type="text" inputmode="decimal" autocomplete="off"><select id="nmS" style="display:none"></select><div id="nmU" style="color:#9a9a9a;font-size:13px"></div><div class="acts"><button id="nmNo" style="background:#444">Cancelar</button><button id="nmOk" style="background:var(--ac);color:#000">Aplicar</button></div></div></div>
 <div id="modal"><div style="max-width:520px;margin:0 auto 8px;text-align:right"><button id="mClose">Cerrar ✕</button></div><div id="grid"></div></div>
 
 <div id="mm"><div class="in"><div style="text-align:right"><button id="mmClose">Cerrar ✕</button></div>
@@ -167,7 +180,7 @@ function fmtVal(p,v){
 }
 
 /* ---------- Estado del preset ---------- */
-const P={blocks:[],snaps:['SNAPSHOT 1','SNAPSHOT 2','SNAPSHOT 3','SNAPSHOT 4'],snap:0,idx:null,name:'',sel:0};
+const P={tempo:null,blocks:[],snaps:['SNAPSHOT 1','SNAPSHOT 2','SNAPSHOT 3','SNAPSHOT 4'],snap:0,idx:null,name:'',sel:0};
 let names={};try{names=JSON.parse(localStorage.getItem('pgnames')||'{}')}catch(e){}
 function saveName(i,n){names[i]=n;try{localStorage.setItem('pgnames',JSON.stringify(names))}catch(e){}}
 
@@ -225,7 +238,22 @@ function applyDump(str){
 
 /* ---------- Dibujo ---------- */
 function catOf(b){const f=b.m&&b.m.f;return(DB&&DB.stems[f])||['?','#555']}
-function render(){renderHead();renderSnaps();renderChain();renderPanel()}
+let dragFlag=false,rpT=null,UIREG={};
+const dragging=()=>dragFlag||performance.now()-userTouch<1200;
+function renderPanelSafe(){clearTimeout(rpT);if(dragging())rpT=setTimeout(renderPanelSafe,400);else renderPanel()}
+if(typeof document.addEventListener==='function'){
+  document.addEventListener('pointerdown',e=>{if(e.target&&e.target.type==='range')dragFlag=true});
+  const up=()=>{if(dragFlag){dragFlag=false;userTouch=performance.now()}};
+  document.addEventListener('pointerup',up);document.addEventListener('pointercancel',up);
+}
+function liveParam(b,k,val){
+  b.v[k]=val;
+  if(P.blocks[P.sel]!==b)return;
+  const reg=UIREG[b.id+':'+k],p=b.m.p[k];
+  if(reg&&!dragging()&&!/^(TempoSync)/.test(p[0])){reg.vs.textContent=fmtVal(p,val);if(reg.r)reg.r.value=val;}
+  else renderPanelSafe();
+}
+function render(){renderHead();renderSnaps();renderChain();renderPanelSafe();renderTempo()}
 function renderHead(){
   $('pName').textContent=P.idx===null?'—':presetLabel(P.idx)+'  '+(P.name||names[P.idx]||'');
 }
@@ -253,7 +281,7 @@ function renderChain(){
   r2.appendChild(io('→'));
 }
 function renderPanel(){
-  const ph=$('ph'),box=$('pars');box.innerHTML='';
+  const ph=$('ph'),box=$('pars');box.innerHTML='';UIREG={};
   const b=P.blocks[P.sel];
   if(!b){ph.innerHTML='<b>Conecta para ver el preset</b>';return}
   if(b.empty){
@@ -271,6 +299,7 @@ function renderPanel(){
   ps.forEach((p,i)=>{
     const sid=p[0];
     if(sid==='@enabled'||sid==='@bypassvolume')return;
+    if(sid==='@trails'){const w=document.createElement('div');w.className='par';w.innerHTML='<div class="top"><label>Trails</label><span class="v" style="color:#777">aún no disponible</span></div>';box.appendChild(w);return}
     if(/^TempoSync/.test(sid))return;
     const suf=sid.replace(/^SyncSelect/,'');
     const isSel=/^SyncSelect/.test(sid);
@@ -289,24 +318,27 @@ function parRow(b,p,i,tsIdx){
   let v=b.v[i];if(v===undefined)v=p[6];
   const label=isSelName(p)?'Note Sync':p[1];
   const top=document.createElement('div');top.className='top';
-  top.innerHTML=`<label>${label}</label><span class="v"></span>`;w.appendChild(top);
-  const vs=top.querySelector('.v');
-  if(tsIdx>=0){const c=document.createElement('button');c.textContent='⏱';c.style.padding='2px 8px';c.onclick=()=>{setParam(b,tsIdx,false);renderPanel()};top.insertBefore(c,vs)}
+  top.innerHTML=`<label>${label}</label>`;w.appendChild(top);
+  const clock=(idx,on)=>{const c=document.createElement('button');c.textContent='⏱';c.style.padding='2px 8px';
+    c.onclick=()=>{setParam(b,idx,on);renderPanel()};return c};
   if(p[3]===2){
-    vs.remove();
-    const s=document.createElement('div');s.className='seg';
+    const sg=document.createElement('div');sg.className='seg';
     ['Off','On'].forEach((t,k)=>{const x=document.createElement('button');x.textContent=t;if(!!v===!!k)x.className='a';
-      x.onclick=()=>{setParam(b,i,!!k);renderPanel()};s.appendChild(x)});
-    top.appendChild(s);return w;
+      x.onclick=()=>{setParam(b,i,!!k);renderPanel()};sg.appendChild(x)});
+    top.appendChild(sg);return w;
   }
-  vs.textContent=fmtVal(p,v);
+  const vs=document.createElement('button');vs.className='vbtn';vs.textContent=fmtVal(p,v);top.appendChild(vs);
+  if(tsIdx>=0)top.insertBefore(clock(tsIdx,false),vs);
   const r=document.createElement('input');r.type='range';r.min=p[4];r.max=p[5];
   r.step=p[3]===0?1:(p[5]-p[4])/1000;r.value=v;
   r.oninput=()=>{const nv=p[3]===0?Math.round(+r.value):+r.value;vs.textContent=fmtVal(p,nv);setParam(b,i,nv,true)};
   w.appendChild(r);
-  // si el modelo tiene sincronía de tempo apagada, el parámetro de tiempo permite activarla
-  const ts=(!/^SyncSelect/.test(p[0])&&/^(Time|Speed)/.test(p[0]))?b.m.p.findIndex(q=>q[0]==='TempoSync'+(p[0].replace(/^(Time|Speed)/,'')||'1')):-1;
-  if(ts>=0){const c=document.createElement('button');c.textContent='⏱';c.style.padding='2px 8px';c.onclick=()=>{setParam(b,ts,true);renderPanel()};top.insertBefore(c,vs)}
+  UIREG[b.id+':'+i]={vs,r};
+  vs.onclick=()=>editValue(b,i,vs,r);
+  if(!isSelName(p)&&/^(Time|Speed)/.test(p[0])){
+    const ts=b.m.p.findIndex(q=>q[0]==='TempoSync'+(p[0].replace(/^(Time|Speed)/,'')||'1'));
+    if(ts>=0)top.insertBefore(clock(ts,true),vs);
+  }
   return w;
 }
 const isSelName=p=>/^SyncSelect/.test(p[0]);
@@ -377,7 +409,8 @@ function onMsg(s,p){
   if(s===S.s02&&d&&d[105]!==undefined){onEvent(d);return}
   if(s===S.s80&&d){
     const r=d[104];
-    if(d[103]!==undefined&&d[103]!==0){log('ERROR de la pedalera, estado '+d[103]+' '+JSON.stringify(r).slice(0,100),'er');toast('La pedalera rechazó un comando (estado '+d[103]+')')}
+    if(d[103]!==undefined&&d[103]>1){log('ERROR de la pedalera, estado '+d[103]+' '+JSON.stringify(r).slice(0,100),'er');toast('La pedalera rechazó el comando (estado '+d[103]+'); actualizando…');scheduleRefetch()}
+    if(r&&typeof r==='object'&&!Array.isArray(r)&&r[118]===15&&typeof r[119]==='number'){P.tempo=r[119];renderTempo()}
     if(r&&typeof r==='object'&&!Array.isArray(r)&&r[13]!==undefined&&r[24]&&typeof r[24]==='object'){applyBlockDef(r[13],r[24]);return}
     if(typeof r==='string'&&r.slice(1,9)==='l6-helix'){try{applyDump(r)}catch(e){log('Error al leer preset: '+e.message,'er')}return}
     if(r&&typeof r==='object'&&!Array.isArray(r)&&r[108]!==undefined&&typeof r[109]==='string'){
@@ -387,7 +420,7 @@ function onMsg(s,p){
     }
   }
 }
-const NOISE=new Set([1,5,20,21,22,34]);   // eventos que no cambian el preset
+const NOISE=new Set([1,5,20,21,22,34,39]);   // eventos que no cambian el preset
 function onEvent(d){
   const t=d[105],e=d[106]||{},inner=e[106];
   if((t===4||t===8)&&inner&&inner[108]!==undefined){
@@ -399,7 +432,10 @@ function onEvent(d){
   }else if(t===49&&inner&&inner[59]!==undefined){
     const b=P.blocks[inner[98]-1];if(b&&!b.empty){b.on=!!inner[59];renderChain();renderPanel()}
   }else if(t===30&&inner&&inner[119]!==undefined){
-    const b=P.blocks[inner[98]-1];if(b&&!b.empty){b.v[inner[28]]=inner[119];if(P.sel===inner[98]-1)renderPanel()}
+    const b=P.blocks[inner[98]-1];
+    if(b&&!b.empty&&b.m){const k=paramFromAddr(b.m,inner[29]===false,inner[28]);if(k>=0)liveParam(b,k,inner[119])}
+  }else if(t===22&&inner&&inner[118]===15&&inner[119]!==undefined){
+    P.tempo=inner[119];renderTempo();
   }else if(!NOISE.has(t)){
     log('EVENTO '+t+' '+JSON.stringify(e).slice(0,110)+' → actualizar','ev');scheduleRefetch();
   }
@@ -432,17 +468,99 @@ function toggleBlock(i){
   const b=P.blocks[i];if(!b||b.empty)return;b.on=!b.on;renderChain();if(i===P.sel)renderPanel();
   sendCmd(S.s80,41,M([98,b.id],[59,b.on]));
 }
+// La pedalera numera por separado los parámetros numéricos (29=true) y los interruptores (29=false).
+function paramAddr(m,i){
+  const ps=m.p,isBool=ps[i][3]===2;let n=0;
+  for(let k=0;k<i;k++){if(ps[k][0][0]==='@')continue;if((ps[k][3]===2)===isBool)n++}
+  return{isBool,idx:n};
+}
+function paramFromAddr(m,isBool,idx){
+  let n=0;
+  for(let k=0;k<m.p.length;k++){
+    const q=m.p[k];if(q[0][0]==='@')continue;
+    if((q[3]===2)===isBool){if(n===idx)return k;n++}
+  }
+  return -1;
+}
 let lastSend=0;
 function setParam(b,i,val,throttle){
   userTouch=performance.now();b.v[i]=val;
   const now=performance.now();if(throttle&&now-lastSend<40)return;lastSend=now;
-  const p=b.m.p[i];
+  const p=b.m.p[i],ad=paramAddr(b.m,i);
   let a;
-  if(p[3]===2)a=M([98,b.id],[29,false],[26,0],[28,i],[119,!!val]);
-  else if(p[3]===0)a=M([98,b.id],[29,true],[26,0],[28,i],[119,Math.round(val)]);
-  else a=M([98,b.id],[29,true],[26,0],[28,i],[119,new Fl(val)]);
+  if(p[0][0]==='@'){log('Parámetro '+p[0]+' aún no se puede cambiar','er');return}
+  if(ad.isBool)a=M([98,b.id],[29,false],[26,0],[28,ad.idx],[119,!!val]);
+  else if(p[3]===0)a=M([98,b.id],[29,true],[26,0],[28,ad.idx],[119,Math.round(val)]);
+  else a=M([98,b.id],[29,true],[26,0],[28,ad.idx],[119,new Fl(val)]);
   sendCmd(S.s80,30,a);
 }
+
+/* ---------- Escribir valores ---------- */
+let nmCb=null;
+function askValue(o){
+  $('nmT').textContent=o.title;$('nmU').textContent=o.hint||'';nmCb=o.cb;
+  const list=o.list;$('nmS').style.display=list?'block':'none';$('nmI').style.display=list?'none':'block';
+  if(list){const sl=$('nmS');sl.innerHTML='';list.forEach((t,k)=>sl.add(new Option(t,k)));sl.value=o.sel}
+  else{$('nmI').value=o.value}
+  $('nm').classList.add('show');
+  if(!list)setTimeout(()=>{$('nmI').focus();$('nmI').select&&$('nmI').select()},50);
+}
+$('nmNo').onclick=()=>$('nm').classList.remove('show');
+$('nmOk').onclick=()=>{
+  const cb=nmCb;
+  const val=$('nmS').style.display==='block'?+$('nmS').value:$('nmI').value;
+  $('nm').classList.remove('show');if(cb)cb(val);
+};
+$('nmI').onkeydown=e=>{if(e.key==='Enter')$('nmOk').onclick()};
+// conversión entre el valor mostrado y el valor interno del parámetro
+function dispScale(p,v){
+  const c=(DB&&DB.dt[p[2]])||{};let scale=c.dspToDisplayScale||1,um=c.unitsMultiplier||1;
+  const f=c.format;
+  if(Array.isArray(f)&&typeof f[0]!=='string'){const x=v*scale,r=f.find(r=>x>=r.lowerBound&&x<r.upperBound)||f[f.length-1];um=r.unitsMultiplier||1}
+  return scale*um;
+}
+function unitOf(p,v){return fmtVal(p,v).replace(/^[\s+\-\d.,]+/,'').trim()}
+function editValue(b,i,vs,r){
+  const p=b.m.p[i];let v=b.v[i];if(v===undefined)v=p[6];
+  const c=(DB&&DB.dt[p[2]])||{};
+  if(Array.isArray(c.format)&&typeof c.format[0]==='string'){
+    const names=c.format.slice(0,Math.round(p[5]-p[4])+1);
+    askValue({title:p[1],list:names,sel:Math.round(v-p[4]),cb:k=>{const nv=Math.round(p[4]+ +k);vs.textContent=fmtVal(p,nv);r.value=nv;setParam(b,i,nv)}});
+    return;
+  }
+  const f=dispScale(p,v),u=unitOf(p,v);
+  const lo=Math.min(p[4]*f,p[5]*f),hi=Math.max(p[4]*f,p[5]*f);
+  askValue({title:p[1],value:String(+(v*f).toFixed(3)),hint:`Valor en ${u||'unidades'} · rango ${+lo.toFixed(3)} a ${+hi.toFixed(3)}`,
+    cb:txt=>{
+      const x=parseFloat(String(txt).replace(',','.'));
+      if(!isFinite(x)){toast('Valor no válido');return}
+      let nv=x/f;const mn=Math.min(p[4],p[5]),mx=Math.max(p[4],p[5]);
+      if(nv<mn||nv>mx){nv=Math.max(mn,Math.min(mx,nv));toast('Valor fuera de rango; se ajustó al límite')}
+      if(p[3]===0)nv=Math.round(nv);
+      vs.textContent=fmtVal(p,nv);r.value=nv;setParam(b,i,nv);
+    }});
+}
+
+/* ---------- Tempo ---------- */
+let taps=[];
+function renderTempo(){$('tBpm').textContent=P.tempo?(+P.tempo).toFixed(1)+' BPM':'— BPM'}
+function setTempo(bpm){
+  bpm=Math.max(30,Math.min(240,bpm));
+  P.tempo=bpm;renderTempo();
+  sendCmd(S.s80,25,M([118,15],[119,new Fl(bpm)]));
+}
+function tapTempo(){
+  const now=performance.now();
+  if(taps.length&&now-taps[taps.length-1]>2500)taps=[];
+  taps.push(now);if(taps.length>5)taps.shift();
+  if(taps.length<2)return;
+  const iv=[];for(let k=1;k<taps.length;k++)iv.push(taps[k]-taps[k-1]);
+  const last=iv.slice(-3),avg=last.reduce((x,y)=>x+y,0)/last.length;
+  setTempo(60000/avg);
+}
+$('tTap').onclick=tapTempo;
+$('tBpm').onclick=()=>askValue({title:'Tempo (BPM)',value:P.tempo?String(+(+P.tempo).toFixed(2)):'',hint:'De 30 a 240 BPM',
+  cb:t=>{const x=parseFloat(String(t).replace(',','.'));if(!isFinite(x)){toast('Valor no válido');return}if(x<30||x>240)toast('Fuera de rango; se ajustó a 30–240');setTempo(x)}});
 
 /* ---------- Mover bloques (intercambio de posiciones contiguas) ---------- */
 function spn(b,i){
