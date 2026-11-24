@@ -203,6 +203,17 @@ function parsePreset(str){
   while((m=re.exec(str)))sn.push(m[1]);
   return{blocks,sn};
 }
+function valuesFor(b,m){
+  if(!m)return b.v;
+  const raw=b.v, v=[];let k=0;
+  for(let i=0;i<m.p.length;i++){
+    const sid=m.p[i][0];
+    if(sid==='@enabled')v[i]=b.on;
+    else if(sid==='@trails')v[i]=raw[m.p.filter(p=>!p[0].startsWith('@')).length];
+    else if(!sid.startsWith('@'))v[i]=raw[k++];
+  }
+  return v;
+}
 function modelOf(bl){
   if(!DB)return null;
   const sid=DB.sym[bl.mid];return sid?{sid,m:DB.m[sid]||null}:null;
@@ -214,7 +225,7 @@ function applyBlockDef(id,def){
   const c=def&&def[20];
   if(c&&c[24]&&c[24][25]!==undefined){
     const b={mid:c[24][25],on:c[10]!==false,v:((c[11]&&c[11][4])||[]).slice()},mo=modelOf(b);
-    P.blocks[i]={id,empty:false,mid:b.mid,on:b.on,v:b.v,sid:mo&&mo.sid,m:mo&&mo.m};
+    P.blocks[i]={id,empty:false,mid:b.mid,on:b.on,v:valuesFor(b,mo&&mo.m),sid:mo&&mo.sid,m:mo&&mo.m};
   }else P.blocks[i]={id,empty:true,on:false,v:[]};
   lastSig='';render();
 }
@@ -224,7 +235,7 @@ function applyDump(str){
   const r=parsePreset(str);
   const nb=r.blocks.map((b,i)=>{
     if(b.empty)return{id:i+1,empty:true,on:false,v:[]};
-    const mo=modelOf(b);return{id:i+1,empty:false,mid:b.mid,on:b.on,v:b.v,sid:mo&&mo.sid,m:mo&&mo.m};
+    const mo=modelOf(b);return{id:i+1,empty:false,mid:b.mid,on:b.on,v:valuesFor(b,mo&&mo.m),sid:mo&&mo.sid,m:mo&&mo.m};
   });
   const sig=JSON.stringify([nb.map(x=>[x.empty,x.mid,x.on,x.v]),r.sn,P.snap]);
   if(sig===lastSig)return;
@@ -250,7 +261,7 @@ function liveParam(b,k,val){
   b.v[k]=val;
   if(P.blocks[P.sel]!==b)return;
   const reg=UIREG[b.id+':'+k],p=b.m.p[k];
-  if(reg&&!dragging()&&!/^(TempoSync)/.test(p[0])){reg.vs.textContent=fmtVal(p,val);if(reg.r)reg.r.value=val;}
+  if(reg&&!dragging()&&p[3]!==2&&!/^(TempoSync)/.test(p[0])){reg.vs.textContent=fmtVal(p,val);if(reg.r)reg.r.value=val;}
   else renderPanelSafe();
 }
 function render(){renderHead();renderSnaps();renderChain();renderPanelSafe();renderTempo()}
@@ -290,16 +301,17 @@ function renderPanel(){
   }
   const[lab,col]=catOf(b);
   ph.style.color=col;
-  ph.innerHTML=`<b>${lab} · ${b.m?b.m.n:'Modelo '+b.mid}${b.m&&b.m.b?'<br><small style="font-weight:400;color:#9a9a9a;font-size:13px">'+basedTxt(b.m.b)+'</small>':''}</b><button id="mvL">◀</button><button id="mvR">▶</button><button id="pm">Cambiar modelo</button><button id="pw">⏻</button>`;
+  ph.innerHTML=`<b>${lab} · ${b.m?b.m.n:'Modelo '+b.mid}${b.m&&b.m.b?'<br><small style="font-weight:400;color:#9a9a9a;font-size:13px">'+basedTxt(b.m.b)+'</small>':''}</b><button id="mvL">◀</button><button id="mvR">▶</button><button id="pm">Cambiar modelo</button><button id="delBlock">Eliminar</button><button id="pw">⏻</button>`;
   $('mvL').onclick=()=>moveBlock(-1);$('mvR').onclick=()=>moveBlock(1);
   $('pw').style.background=b.on?'#1c6e1c':'#444';$('pw').onclick=()=>toggleBlock(P.sel);
   $('pm').onclick=()=>openModels();
+  $('delBlock').onclick=async()=>{if(busy||!run||!b.m||['amp','preamp','cab','cabmicirs','wah','volumepan','eq','sendreturn'].includes(b.m.f))return toast('Bloque protegido');if(!confirm('¿Eliminar este efecto?'))return;await sendCmd(S.s80,28,M([98,b.id]));scheduleRefetch()};
   if(!b.m){box.innerHTML='<div style="color:#888">Sin datos de parámetros para este modelo.</div>';return}
   const ps=b.m.p,idxOf=sid=>ps.findIndex(p=>p[0]===sid);
   ps.forEach((p,i)=>{
     const sid=p[0];
     if(sid==='@enabled'||sid==='@bypassvolume')return;
-    if(sid==='@trails'){const w=document.createElement('div');w.className='par';w.innerHTML='<div class="top"><label>Trails</label><span class="v" style="color:#777">aún no disponible</span></div>';box.appendChild(w);return}
+    if(sid==='@trails'){box.appendChild(parRow(b,p,i,-1));return}
     if(/^TempoSync/.test(sid))return;
     const suf=sid.replace(/^SyncSelect/,'');
     const isSel=/^SyncSelect/.test(sid);
@@ -323,7 +335,7 @@ function parRow(b,p,i,tsIdx){
     c.onclick=()=>{setParam(b,idx,on);renderPanel()};return c};
   if(p[3]===2){
     const sg=document.createElement('div');sg.className='seg';
-    ['Off','On'].forEach((t,k)=>{const x=document.createElement('button');x.textContent=t;if(!!v===!!k)x.className='a';
+    (p[2]==='voltage'?['9 V','18 V']:['Off','On']).forEach((t,k)=>{const x=document.createElement('button');x.textContent=t;if(!!v===!!k)x.className='a';
       x.onclick=()=>{setParam(b,i,!!k);renderPanel()};sg.appendChild(x)});
     top.appendChild(sg);return w;
   }
@@ -332,6 +344,7 @@ function parRow(b,p,i,tsIdx){
   const r=document.createElement('input');r.type='range';r.min=p[4];r.max=p[5];
   r.step=p[3]===0?1:(p[5]-p[4])/1000;r.value=v;
   r.oninput=()=>{const nv=p[3]===0?Math.round(+r.value):+r.value;vs.textContent=fmtVal(p,nv);setParam(b,i,nv,true)};
+  r.onchange=()=>setParam(b,i,p[3]===0?Math.round(+r.value):+r.value,false);
   w.appendChild(r);
   UIREG[b.id+':'+i]={vs,r};
   vs.onclick=()=>editValue(b,i,vs,r);
@@ -363,7 +376,7 @@ function frame(s,x2,body){
   f.set(body,16);s.seq=(s.seq+1)&255;return f;
 }
 function sendRaw(s,payload){const n=payload.length;return out(frame(s,0x04,[1,0,s.ch,0,n&255,(n>>8)&255,0,0,...payload]))}
-function sendCmd(s,cmd,args){return sendRaw(s,enc(M([102,s.mc++],[100,cmd],[101,args===undefined?null:args])))}
+function sendCmd(s,cmd,args){const id=s.mc++;if(s===S.s80&&cmd===22){dumpRequests.set(id,revision);if(dumpRequests.size>100)dumpRequests.delete(dumpRequests.keys().next().value)}return sendRaw(s,enc(M([102,id],[100,cmd],[101,args===undefined?null:args])))}
 const ack=s=>out(frame(s,0x08));
 const keep=s=>out(frame(s,0x10));
 
@@ -412,7 +425,7 @@ function onMsg(s,p){
     if(d[103]!==undefined&&d[103]>1){log('ERROR de la pedalera, estado '+d[103]+' '+JSON.stringify(r).slice(0,100),'er');toast('La pedalera rechazó el comando (estado '+d[103]+'); actualizando…');scheduleRefetch()}
     if(r&&typeof r==='object'&&!Array.isArray(r)&&r[118]===15&&typeof r[119]==='number'){P.tempo=r[119];renderTempo()}
     if(r&&typeof r==='object'&&!Array.isArray(r)&&r[13]!==undefined&&r[24]&&typeof r[24]==='object'){applyBlockDef(r[13],r[24]);return}
-    if(typeof r==='string'&&r.slice(1,9)==='l6-helix'){try{applyDump(r)}catch(e){log('Error al leer preset: '+e.message,'er')}return}
+    if(typeof r==='string'&&r.slice(1,9)==='l6-helix'){const rev=dumpRequests.get(d[102]);dumpRequests.delete(d[102]);if(rev!==undefined&&rev!==revision){scheduleRefetch();return}try{applyDump(r)}catch(e){log('Error al leer preset: '+e.message,'er')}return}
     if(r&&typeof r==='object'&&!Array.isArray(r)&&r[108]!==undefined&&typeof r[109]==='string'){
       P.idx=r[108];P.name=r[109].replace(/\0/g,'');saveName(P.idx,P.name);
       if(r[92]!==undefined)P.snap=r[92];
@@ -429,11 +442,18 @@ function onEvent(d){
     saveName(inner[108],inner[109].replace(/\0/g,''));if(inner[108]===P.idx){P.name=names[P.idx];renderHead()}
   }else if((t===42||t===46)&&e[92]!==undefined){
     P.snap=e[92];renderSnaps();log('EVENTO snapshot → '+(P.snap+1),'ev');fetchPreset(false);
+  }else if(t===49&&inner&&Number.isInteger(inner[75])&&Number.isInteger(inner[76])){
+    revision++;const from=inner[75]-1,to=inner[76]-1;
+    if(from>=0&&to>=0&&from<P.blocks.length&&to<P.blocks.length){
+      const selected=P.blocks[P.sel];const [moved]=P.blocks.splice(from,1);P.blocks.splice(to,0,moved);
+      P.blocks.forEach((b,i)=>b.id=i+1);P.sel=P.blocks.indexOf(selected);lastSig='';render();
+    }
+    P.undo=null;$('undo').style.display='none';scheduleRefetch();
   }else if(t===49&&inner&&inner[59]!==undefined){
     const b=P.blocks[inner[98]-1];if(b&&!b.empty){b.on=!!inner[59];renderChain();renderPanel()}
   }else if(t===30&&inner&&inner[119]!==undefined){
     const b=P.blocks[inner[98]-1];
-    if(b&&!b.empty&&b.m){const k=paramFromAddr(b.m,inner[29]===false,inner[28]);if(k>=0)liveParam(b,k,inner[119])}
+    if(b&&!b.empty&&b.m){const k=paramFromAddr(b.m,inner[29]===true,inner[28]);if(k>=0){revision++;liveParam(b,k,inner[119])}}
   }else if(t===22&&inner&&inner[118]===15&&inner[119]!==undefined){
     P.tempo=inner[119];renderTempo();
   }else if(!NOISE.has(t)){
@@ -441,10 +461,11 @@ function onEvent(d){
   }
 }
 let lastFetch=0,rfT=null,userTouch=0,pollT=null;
+let revision=0;const dumpRequests=new Map();
 function scheduleRefetch(){
   clearTimeout(rfT);
   const wait=Math.max(300,900-(performance.now()-lastFetch));
-  rfT=setTimeout(()=>fetchPreset(false),wait);
+  rfT=setTimeout(()=>{if(busy||performance.now()-userTouch<1200){scheduleRefetch();return}fetchPreset(false)},wait);
 }
 
 /* ---------- Comandos ---------- */
@@ -468,31 +489,25 @@ function toggleBlock(i){
   const b=P.blocks[i];if(!b||b.empty)return;b.on=!b.on;renderChain();if(i===P.sel)renderPanel();
   sendCmd(S.s80,41,M([98,b.id],[59,b.on]));
 }
-// La pedalera numera por separado los parámetros numéricos (29=true) y los interruptores (29=false).
+// Los parámetros normales conservan su índice, incluso los booleanos.
+// Trails es un atributo independiente (grupo false, índice 0).
 function paramAddr(m,i){
-  const ps=m.p,isBool=ps[i][3]===2;let n=0;
-  for(let k=0;k<i;k++){if(ps[k][0][0]==='@')continue;if((ps[k][3]===2)===isBool)n++}
-  return{isBool,idx:n};
+  const p=m.p[i];if(p[0]==='@trails')return{group:false,idx:0};
+  return{group:true,idx:m.p.slice(0,i).filter(q=>!q[0].startsWith('@')).length};
 }
-function paramFromAddr(m,isBool,idx){
-  let n=0;
-  for(let k=0;k<m.p.length;k++){
-    const q=m.p[k];if(q[0][0]==='@')continue;
-    if((q[3]===2)===isBool){if(n===idx)return k;n++}
-  }
-  return -1;
+function paramFromAddr(m,group,idx){
+  if(!group)return idx===0?m.p.findIndex(p=>p[0]==='@trails'):-1;
+  let n=0;return m.p.findIndex(p=>!p[0].startsWith('@')&&n++===idx);
 }
 let lastSend=0;
 function setParam(b,i,val,throttle){
-  userTouch=performance.now();b.v[i]=val;
+  if(!run||busy)return;
+  userTouch=performance.now();revision++;b.v[i]=val;
   const now=performance.now();if(throttle&&now-lastSend<40)return;lastSend=now;
   const p=b.m.p[i],ad=paramAddr(b.m,i);
-  let a;
-  if(p[0][0]==='@'){log('Parámetro '+p[0]+' aún no se puede cambiar','er');return}
-  if(ad.isBool)a=M([98,b.id],[29,false],[26,0],[28,ad.idx],[119,!!val]);
-  else if(p[3]===0)a=M([98,b.id],[29,true],[26,0],[28,ad.idx],[119,Math.round(val)]);
-  else a=M([98,b.id],[29,true],[26,0],[28,ad.idx],[119,new Fl(val)]);
-  sendCmd(S.s80,30,a);
+  if(p[0].startsWith('@')&&p[0]!=='@trails')return;
+  const value=p[3]===2?!!val:p[3]===0?Math.round(val):new Fl(val);
+  sendCmd(S.s80,30,M([98,b.id],[29,ad.group],[26,0],[28,ad.idx],[119,value]));
 }
 
 /* ---------- Escribir valores ---------- */
@@ -588,17 +603,12 @@ function swapBlocks(blob,p,movedTo){
   const chain=mg(mg(root,0),22);if(!chain||chain.k.length!==12)throw new Error('cadena no encontrada');
   const e1=chain.k[p],e2=chain.k[p+1];
   const c1=mg(e1,20),c2=mg(e2,20);
-  if(!c1||!c2||c1.t!=='map'||c2.t!=='map')throw new Error('Por ahora solo puedo intercambiar dos bloques con modelo (no campos vacíos)');
-  for(const c of[c1,c2]){
-    const mid=mg(mg(c,24),25),sid=mid&&DB&&DB.sym[mid.v],f=sid&&DB.m[sid]&&DB.m[sid].f;
-    if(!f)throw new Error('modelo desconocido');
-    if(BLOCKED.has(f))throw new Error('Mover el amp o el gabinete aún no está soportado (cambia el enrutado interno)');
-  }
-  // asignaciones de pedal/footswitch que apuntan a estos bloques (/4[k][*]/1/5): aún no sé reordenarlas
+  if(!c1||!c2)throw new Error('Entrada de bloque desconocida');
+  for(const e of [e1,e2]){const kind=mg(e,19);if(!kind||![6,8].includes(kind.v))throw new Error('Tipo de bloque no movible');}
   const l4=mg(root,4);
   if(l4)for(const n of l4.k){
     if(n.t!=='arr')continue;
-    for(const d of n.k){const v=mg(mg(d,1),5);if(v&&v.t==='int'&&(v.v===p||v.v===p+1))throw new Error('Ese bloque tiene un pedal o footswitch asignado; aún no puedo moverlo sin perder la asignación')}
+    for(const d of n.k){const v=mg(mg(d,1),5);if(v&&v.t==='int'&&(v.v===p||v.v===p+1))throw new Error('Asignación de pedal no verificada para este movimiento');}
   }
   // referencias de controladores a posiciones: /3/8[i][*]/11/8
   const l38=mg(mg(root,3),8);
@@ -662,18 +672,18 @@ async function moveBlock(dir){
   if(dir<0&&i===0||dir>0&&i===P.blocks.length-1){toast('No se puede mover más en esa dirección');return}
   busy=true;
   try{
-    await sendCmd(S.s80,22,null);const ok=await waitDump(1500);
+    const pending=waitDump(1500);await sendCmd(S.s80,22,null);const ok=await pending;
     if(!ok||!P.raw){toast('No pude leer el preset actual; no se movió nada');return}
     const before=sigOrder(),backup=P.raw.slice();
     let nb;
     try{nb=swapBlocks(P.raw,p+1,dir<0?p+1:p+2)}catch(e){toast(e.message);log('Mover cancelado: '+e.message,'er');return}
     P.undo=backup;
     await sendPreset(nb);log(`→ mover bloque ${i+1} ${dir<0?'a la izquierda':'a la derecha'}`,'ok');
-    await sleep(700);await sendCmd(S.s80,22,null);await waitDump(2000);
+    await sleep(700);const check=waitDump(2000);await sendCmd(S.s80,22,null);if(!await check){toast('No se pudo verificar el movimiento; vuelve a leer el preset');return;}
     const after=sigOrder(),exp=before.split(',');const t=exp[p];exp[p]=exp[p+1];exp[p+1]=t;
     if(after===exp.join(',')){P.sel=i+dir;render();toast2('Bloque movido');}
     else if(after===before){toast('La pedalera no aplicó el movimiento');log('Verificación: el orden no cambió','er')}
-    else{toast('Resultado inesperado; restaurando el preset anterior');log('Verificación fallida, restaurando','er');await sendPreset(P.undo);await sleep(700);await sendCmd(S.s80,22,null)}
+    else{toast('Orden inesperado; revisa la pedalera antes de deshacer');log('Verificación fallida; no se sobrescribió el preset','er')}
     $('undo').style.display=P.undo?'inline-block':'none';
   }catch(e){toast('Error al mover: '+e.message);log('Mover: '+e.message,'er')}
   finally{busy=false}
